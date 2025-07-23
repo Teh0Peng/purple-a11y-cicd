@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       A11Y_ENGINE_BRANCH:
-        description: 'Purple A11y Branch (master, other)'
+        description: 'Oobee Branch (master, other)'
         required: true
         default: 'master'
       A11Y_SCAN_URL:
@@ -18,7 +18,7 @@ on:
       A11Y_SCAN_MAX_NUM_PAGES:
         description: 'Maximum Number of Pages to Scan'
         required: true
-        default: '10'
+        default: '100'
       A11Y_SCAN_MAX_CONCURRENCY:
         description: 'Maximum Number of Concurrent Page Scans'
         required: true
@@ -26,15 +26,15 @@ on:
       A11Y_SCAN_SCREENSHOTS:
         description: 'Include screenshots (screenshots, none)'
         required: true
-        default: 'screenshots'
+        default: 'none'
       A11Y_SCAN_FOLLOW_ROBOTS:
         description: 'Crawler adhere to robots.txt (yes, no)'
         required: true
         default: 'no'
       A11Y_SCAN_STRATEGY:
         description: 'Crawler adhere to pages matching exact hostname or same parent domain (same-hostname, same-domain)'
-        required: true
-        default: 'same-domain'
+        required: false
+        default: ''
       USERNAME:
         description: "Your name (for telemetry purposes)"
         required: false
@@ -44,7 +44,7 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
 
     steps:
       - name: Get Public IP Address
@@ -82,38 +82,38 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@master
         with:
-          repository: "GovTechSG/purple-a11y"
+          repository: "GovTechSG/oobee"
           ref: "${{ github.event.inputs.A11Y_ENGINE_BRANCH }}"
           
       - name: Build and run Docker container
         run: |
-          # Build your Docker image (replace 'purple-a11y' and 'Dockerfile' with your image name and Dockerfile path)
-          docker build -t purple-a11y .
+          # Build your Docker image (replace 'oobee' and 'Dockerfile' with your image name and Dockerfile path)
+          docker build -t oobee .
           # Run the Docker container (adjust any options as needed)
-          docker run -dit --name purple-a11y-container purple-a11y
+          docker run -dit --name oobee-container --add-host=docs.google.com:0.0.0.0 --add-host=assets.wogaa.sg:0.0.0.0 oobee
         # Ensure the Docker container is running before running the next step
         continue-on-error: true
   
       - name: Start accessibility scan in Docker container
         run: |
           # Execute a webisite crawl
-          docker exec -e PURPLE_A11Y_VERBOSE=true purple-a11y-container npm run cli -- -c "${{ github.event.inputs.A11Y_SCANNER }}" -u "${{ github.event.inputs.A11Y_SCAN_URL }}" -p "${{ github.event.inputs.A11Y_SCAN_MAX_NUM_PAGES }}" -t "${{ github.event.inputs.A11Y_SCAN_MAX_CONCURRENCY }}" -a "${{ github.event.inputs.A11Y_SCAN_SCREENSHOTS }}" -r "${{ github.event.inputs.A11Y_SCAN_FOLLOW_ROBOTS }}" -s "${{ github.event.inputs.A11Y_SCAN_STRATEGY}}" -k "${{ env.username }}:${{ env.final_email }}" -b chromium || true
+          docker exec -e OOBEE_VERBOSE=true oobee-container npm run cli -- -c "${{ github.event.inputs.A11Y_SCANNER }}" -u "${{ github.event.inputs.A11Y_SCAN_URL }}" -p "${{ github.event.inputs.A11Y_SCAN_MAX_NUM_PAGES }}" -t "${{ github.event.inputs.A11Y_SCAN_MAX_CONCURRENCY }}" -a "${{ github.event.inputs.A11Y_SCAN_SCREENSHOTS }}" -r "${{ github.event.inputs.A11Y_SCAN_FOLLOW_ROBOTS }}" ${{ github.event.inputs.A11Y_SCAN_STRATEGY != '' && format('-s {0}', github.event.inputs.A11Y_SCAN_STRATEGY) || '' }} -k "${{ env.username }}:${{ env.final_email }}" -b chromium -y enable-wcag-aaa -g yes || true
          
       - name: Print errors
         run: |
-          docker exec purple-a11y-container cat errors.txt || true
+          docker exec oobee-container cat errors.txt || true
         
       - name: Print logs
         run: |
-          docker exec purple-a11y-container cat logs/*/*.txt || true
+          docker exec oobee-container cat logs/*/*.txt || true
       - name: Copy Results from Docker Container
-        run: docker cp purple-a11y-container:/app/results ./results
+        run: docker cp oobee-container:/app/oobee/results ./results
   
       - name: Zip Results
         run: zip -r results.zip ./results
   
       - name: Upload Zip File
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: results
           path: results.zip
@@ -121,5 +121,5 @@ jobs:
       - name: Cleanup Docker container
         run: |
           # Stop and remove the Docker container
-          docker stop purple-a11y-container
-          docker rm purple-a11y-container
+          docker stop oobee-container
+          docker rm oobee-container
