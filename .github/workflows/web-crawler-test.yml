@@ -33,6 +33,10 @@ on:
           - 1g
           - 2g
           - 4g
+      A11Y_DOCKER_MAX_DISK:
+        description: 'Docker disk space limit (e.g., 10G, 20G)'
+        required: false
+        default: '20G'
       A11Y_NODE_MAX_OLD_SPACE:
         description: 'Node max old space size in MB'
         required: false
@@ -46,9 +50,9 @@ on:
         required: true
         default: 'no'
       A11Y_SCAN_STRATEGY:
-        description: 'Crawler adhere to pages matching exact hostname or same parent domain (same-hostname, same-domain)'
+        description: 'Crawler strategy (same-hostname, same-domain). Leave blank for unsupported scans like local files.'
         required: false
-        default: 'same-hostname'
+        default: ''
       A11Y_DEVICE:
         description: 'Device'
         required: false
@@ -66,6 +70,7 @@ jobs:
     env:
       DOCKER_MAX_MEMORY_INPUT: ${{ github.event.inputs.A11Y_DOCKER_MAX_MEMORY || 'host-default' }}
       DOCKER_MAX_MEMORY_VAR: ${{ vars.DOCKER_MAX_MEMORY || '' }}
+      DOCKER_MAX_DISK_INPUT: ${{ github.event.inputs.A11Y_DOCKER_MAX_DISK || '20G' }}
 
     steps:
       - name: Get Public IP Address
@@ -100,6 +105,32 @@ jobs:
           echo "username=$username" >> $GITHUB_ENV
           # Use $final_email and $username in subsequent steps
 
+      - name: Configure Docker for Storage Quotas (XFS)
+        run: |
+          # Install XFS utilities (just in case they are missing on the arm runner)
+          sudo apt-get update && sudo apt-get install -y xfsprogs
+          
+          # Stop the Docker daemon
+          sudo systemctl stop docker
+          
+          # Clear existing docker data and prepare the mount point
+          sudo rm -rf /var/lib/docker
+          sudo mkdir -p /var/lib/docker
+          
+          # Create a 100GB sparse file for Docker's backend 
+          # Note: 'truncate' creates a sparse file, so it won't actually consume 100GB on the runner instantly.
+          # We use 100G here to ensure there's plenty of headroom regardless of what A11Y_DOCKER_MAX_DISK is set to.
+          sudo truncate -s 100G /tmp/docker-backend.img
+          
+          # Format the sparse file as XFS
+          sudo mkfs.xfs /tmp/docker-backend.img
+          
+          # Mount it to /var/lib/docker with the required pquota flag
+          sudo mount -o loop,pquota /tmp/docker-backend.img /var/lib/docker
+          
+          # Restart Docker
+          sudo systemctl start docker
+          
       - name: Checkout code
         uses: actions/checkout@master
         with:
@@ -110,6 +141,7 @@ jobs:
         run: |
           # Build your Docker image (replace 'oobee' and 'Dockerfile' with your image name and Dockerfile path)
           docker build -t oobee .
+          
           # Prefer workflow input; fall back to repo variable; otherwise use host default.
           selected_memory="${DOCKER_MAX_MEMORY_INPUT}"
           if [ "${selected_memory}" = "host-default" ]; then
@@ -121,18 +153,27 @@ jobs:
           if [ -n "${selected_memory}" ]; then
             memory_arg="--memory=${selected_memory}"
           fi
-          docker run -dit --name oobee-container ${memory_arg} --add-host=docs.google.com:0.0.0.0 --add-host=assets.wogaa.sg:0.0.0.0 oobee
+          
+          # Apply the user-defined disk size from the workflow inputs
+          docker run -dit --name oobee-container ${memory_arg} --storage-opt size=${DOCKER_MAX_DISK_INPUT} --add-host=docs.google.com:0.0.0.0 --add-host=assets.wogaa.sg:0.0.0.0 oobee
         # Ensure the Docker container is running before running the next step
         continue-on-error: true
-
+        
       - name: Start accessibility scan in Docker container
         run: |
+          # Conditionally add the -s flag based on user input
+          strategy_arg=""
+          strategy_input="${{ github.event.inputs.A11Y_SCAN_STRATEGY }}"
+          if [ -n "$strategy_input" ]; then
+            strategy_arg="-s $strategy_input"
+          fi
+        
           # Execute a webisite crawl
-          docker exec -e OOBEE_VERBOSE=1 -e OOBEE_FAST_CRAWLER=1 oobee-container node --max-old-space-size=${{ github.event.inputs.A11Y_NODE_MAX_OLD_SPACE || '10000' }} ./dist/cli.js -c "${{ github.event.inputs.A11Y_SCANNER }}" -d "${{ github.event.inputs.A11Y_DEVICE }}" -u "${{ github.event.inputs.A11Y_SCAN_URL }}" -p "${{ github.event.inputs.A11Y_SCAN_MAX_NUM_PAGES }}" -t "${{ github.event.inputs.A11Y_SCAN_MAX_CONCURRENCY }}" -a "${{ github.event.inputs.A11Y_SCAN_SCREENSHOTS }}" -r "${{ github.event.inputs.A11Y_SCAN_FOLLOW_ROBOTS }}" ${{ github.event.inputs.A11Y_SCAN_STRATEGY != '' && format('-s {0}', github.event.inputs.A11Y_SCAN_STRATEGY) || '' }} -k "${{ env.username }}:${{ env.final_email }}" -b chromium -y enable-wcag-aaa -g yes || true
+          docker exec -e OOBEE_VERBOSE=1 -e OOBEE_FAST_CRAWLER=1 oobee-container node --max-old-space-size=${{ github.event.inputs.A11Y_NODE_MAX_OLD_SPACE || '10000' }} ./dist/cli.js -c "${{ github.event.inputs.A11Y_SCANNER }}" -d "${{ github.event.inputs.A11Y_DEVICE }}" -u "${{ github.event.inputs.A11Y_SCAN_URL }}" -p "${{ github.event.inputs.A11Y_SCAN_MAX_NUM_PAGES }}" -t "${{ github.event.inputs.A11Y_SCAN_MAX_CONCURRENCY }}" -a "${{ github.event.inputs.A11Y_SCAN_SCREENSHOTS }}" -r "${{ github.event.inputs.A11Y_SCAN_FOLLOW_ROBOTS }}" $strategy_arg -k "${{ env.username }}:${{ env.final_email }}" -b chromium -y enable-wcag-aaa -g yes || true
 
       - name: Print logs
         run: |
-          docker exec oobee-container cat /app/oobee/????????-????-????-????-????????????.txt || true
+          docker exec oobee-container sh -c 'cat /app/oobee/????????-????-????-????-????????????.txt' || true
 
       - name: Copy Results from Docker Container
         run: docker cp oobee-container:/app/oobee/results ./results
